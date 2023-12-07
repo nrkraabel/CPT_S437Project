@@ -31,27 +31,40 @@ class ImageGPSDataset(Dataset):
         coords = self.coordinates[idx]
         coords = torch.tensor(coords, dtype=torch.float32)
         return image, coords
+    
+    def label_city(lat, lng):
+        if 40.0 <= lat <= 40.5 and -80.0 <= lng <= -79.5:
+            return 0  # Pittsburgh
+        elif 28.3 <= lat <= 28.6 and -81.5 <= lng <= -81.0:
+            return 1  # Orlando
+        elif 40.7 <= lat <= 40.9 and -74.0 <= lng <= -73.9:
+            return 2  # Manhattan
+        else:
+            return -1  # Outside these cities
 
 #Simplfied verison just using resnet 
 class ResnetGPSModel(nn.Module):
     def __init__(self):
         super(ResnetGPSModel, self).__init__() 
         self.base_model = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V1)
-        
-        '''I may need to freeze early layers
-            for param in self.base_model.parameters():
-                param.requires_grad = False'''
+        '''I may need to freeze early layers'''
+        for param in self.base_model.parameters():
+                param.requires_grad = False
         self.base_model.fc = nn.Sequential(
             nn.Linear(self.base_model.fc.in_features, 512),
             nn.ReLU(),
             nn.Dropout(0.5),
             nn.Linear(512, 2) 
         )
+          # Initialize weights of the new fully connected layers
+        nn.init.kaiming_normal_(self.base_model.fc[0].weight, mode='fan_out', nonlinearity='relu')
+        nn.init.kaiming_normal_(self.base_model.fc[3].weight, mode='fan_out', nonlinearity='relu')
 
     def forward(self, x):
         return self.base_model(x)  # (lat,lng)
 
-#I may need to expand this but here is the start 
+'''The complexity of each verison is decreasing due to memory usage limitations and as added complexity 
+does not appear to help past a certain point.'''
 class ImageGPSModelV1(nn.Module):
     def __init__(self):
         super(ImageGPSModelV1, self).__init__()
@@ -128,7 +141,7 @@ class ImageGPSModelV2(nn.Module):
 class ImageGPSModelV3(nn.Module):
     def __init__(self):
         super(ImageGPSModelV3, self).__init__()
-        # Reduced Convolutional Layers
+        #Convolutional Layers
         self.conv1 = nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1)
         self.bn1 = nn.BatchNorm2d(16)
         self.conv2 = nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1)
@@ -141,9 +154,10 @@ class ImageGPSModelV3(nn.Module):
 
         # Adjusted Fully Connected Layers
     
-        self.fc1 = nn.Linear(100352, 256)  
+        self.fc1 = nn.Linear(65536, 512)  
         self.dropout = nn.Dropout(0.5)
-        self.fc2 = nn.Linear(256, 2)  
+        self.fc2 = nn.Linear(512, 256)  
+        self.fc3 = nn.Linear(256, 2) 
 
     def forward(self, x):
         # Reduced layers in forward pass
@@ -155,6 +169,42 @@ class ImageGPSModelV3(nn.Module):
 
         x = F.relu(self.fc1(x))
         x = self.dropout(x)
-        x = self.fc2(x) #(lat,lng)
+        x = self.fc2(x) 
+        x = self.fc3(x) #(lat,lng)
         return x
 
+#first does classification then 
+class ImageCityModel(nn.Module):
+    def __init__(self):
+        super(ImageCityModel, self).__init__()
+        #Convolutional Layers
+        self.conv1 = nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1)
+        self.bn1 = nn.BatchNorm2d(16)
+        self.conv2 = nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1)
+        self.bn2 = nn.BatchNorm2d(32)
+        self.conv3 = nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1)
+        self.bn3 = nn.BatchNorm2d(64)
+
+        # Pooling
+        self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
+
+        # Adjusted Fully Connected Layers
+    
+        self.fc1 = nn.Linear(65536, 512)  
+        self.dropout = nn.Dropout(0.5)
+        self.fc2 = nn.Linear(512, 256)  
+        self.fc3 = nn.Linear(256, 3)  #  for 3 cities
+
+    def forward(self, x):
+        # Reduced layers in forward pass
+        x = self.pool(F.relu(self.bn1(self.conv1(x))))
+        x = self.pool(F.relu(self.bn2(self.conv2(x))))
+        x = F.relu(self.bn3(self.conv3(x)))
+
+        x = torch.flatten(x, 1)
+
+        x = F.relu(self.fc1(x))
+        x = self.dropout(x)
+        x = self.fc2(x) 
+        x = self.fc3(x) #(lat,lng)
+        return F.log_softmax(x, dim=1) #for classification
